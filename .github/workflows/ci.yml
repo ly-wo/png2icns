@@ -1,0 +1,269 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Run tests daily at 2 AM UTC
+    - cron: "0 2 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Check documentation
+        run: cargo doc --no-deps --document-private-items
+
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        rust: [stable, beta]
+        exclude:
+          # Skip beta on macOS to reduce CI time
+          - os: macos-latest
+            rust: beta
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-${{ matrix.rust }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-${{ matrix.rust }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.rust }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run tests
+        run: cargo test --verbose
+
+      - name: Build release
+        run: cargo build --release --verbose
+
+      - name: Test binary
+        run: |
+          ./target/release/png2icns --help
+          ./target/release/png2icns --version
+
+  docker-test:
+    name: Docker Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: png2icns:ci-test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Test Docker image basic functionality
+        run: |
+          # Test help command
+          docker run --rm png2icns:ci-test --help
+          docker run --rm png2icns:ci-test --version
+
+      - name: Run comprehensive Docker tests
+        run: |
+          # Create test directories
+          mkdir -p ci-test-input ci-test-output
+
+          # Create test images with different sizes
+          docker run --rm -v $(pwd)/ci-test-input:/tmp python:3.9-slim bash -c "
+          pip install Pillow > /dev/null 2>&1
+          python3 -c \"
+          from PIL import Image
+
+          # Create different test images
+          sizes = [(64, 64), (256, 256), (512, 512), (1024, 1024)]
+          colors = ['red', 'green', 'blue', 'yellow']
+
+          for i, (size, color) in enumerate(zip(sizes, colors)):
+              img = Image.new('RGB', size, color=color)
+              img.save(f'/tmp/test_{size[0]}x{size[1]}.png')
+              print(f'Created test_{size[0]}x{size[1]}.png')
+          \"
+          "
+
+          # Test different presets
+          for preset in basic standard full; do
+            echo "Testing preset: $preset"
+            docker run --rm \
+              -v $(pwd)/ci-test-input:/app/input \
+              -v $(pwd)/ci-test-output:/app/output \
+              png2icns:ci-test \
+              -i /app/input/test_256x256.png \
+              -o /app/output/test_${preset}.icns \
+              --preset $preset \
+              --verbose
+          done
+
+          # Test custom sizes
+          echo "Testing custom sizes"
+          docker run --rm \
+            -v $(pwd)/ci-test-input:/app/input \
+            -v $(pwd)/ci-test-output:/app/output \
+            png2icns:ci-test \
+            -i /app/input/test_512x512.png \
+            -o /app/output/test_custom.icns \
+            --sizes 16,32,64,128 \
+            --verbose
+
+          # Verify all outputs
+          echo "Verifying outputs:"
+          for file in ci-test-output/*.icns; do
+            if [ -f "$file" ]; then
+              echo "✅ $(basename "$file"): $(stat -c%s "$file") bytes"
+              file "$file"
+            else
+              echo "❌ Missing: $(basename "$file")"
+              exit 1
+            fi
+          done
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run security audit
+        run: cargo audit
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Generate code coverage
+        run: cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: cobertura.xml
+          fail_ci_if_error: false
+
+  benchmark:
+    name: Benchmark
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run benchmarks
+        run: |
+          # Create benchmark test images
+          mkdir -p bench-input
+          docker run --rm -v $(pwd)/bench-input:/tmp python:3.9-slim bash -c "
+          pip install Pillow > /dev/null 2>&1
+          python3 -c \"
+          from PIL import Image
+          import time
+
+          # Create benchmark images
+          sizes = [64, 128, 256, 512, 1024]
+          for size in sizes:
+              img = Image.new('RGB', (size, size), color='blue')
+              img.save(f'/tmp/bench_{size}x{size}.png')
+              print(f'Created bench_{size}x{size}.png')
+          \"
+          "
+
+          # Build release binary
+          cargo build --release
+
+          # Run conversion benchmarks
+          mkdir -p bench-output
+          echo "Running conversion benchmarks..."
+
+          for size in 64 128 256 512 1024; do
+            echo "Benchmarking ${size}x${size}:"
+            time ./target/release/png2icns \
+              -i bench-input/bench_${size}x${size}.png \
+              -o bench-output/bench_${size}x${size}.icns \
+              --preset standard
+          done

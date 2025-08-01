@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  png2icns:
+    build: .
+    image: png2icns:latest
+    container_name: png2icns-converter
+    volumes:
+      # 挂载当前目录的 input 和 output 文件夹
+      - ./input:/app/input:ro
+      - ./output:/app/output:rw
+    working_dir: /app
+    # 默认命令，可以通过 docker-compose run 覆盖
+    command: ["--help"]
+    
+  # 开发服务 - 挂载源代码进行开发
+  dev:
+    build: 
+      context: .
+      target: builder
+    image: png2icns:dev
+    container_name: png2icns-dev
+    volumes:
+      - .:/app
+      - cargo-cache:/usr/local/cargo/registry
+    working_dir: /app
+    command: ["cargo", "run", "--", "--help"]
+
+volumes:
+  cargo-cache:

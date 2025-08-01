@@ -1,0 +1,31 @@
+# Rust
+/target/
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Input/Output directories (but keep the directories)
+input/*
+!input/.gitkeep
+output/*
+!output/.gitkeep
+examples/*
+!examples/.gitkeep
+
+# Logs
+*.log
+
+# Docker
+.dockerignore
+
+# Temporary files
+*.tmp
+*.temp

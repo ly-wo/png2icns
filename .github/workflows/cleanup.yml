@@ -1,0 +1,141 @@
+name: Cleanup
+
+on:
+  schedule:
+    # Run cleanup weekly on Saturdays at 1 AM UTC
+    - cron: '0 1 * * 6'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (do not actually delete anything)'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  cleanup-packages:
+    name: Cleanup Old Packages
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+
+    steps:
+      - name: Check if package exists
+        id: check-package
+        run: |
+          echo "Checking if container package exists..."
+          if gh api repos/${{ github.repository }}/packages/container/${{ github.event.repository.name }} >/dev/null 2>&1; then
+            echo "package-exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Container package exists"
+          else
+            echo "package-exists=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ Container package does not exist yet"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Delete old container images
+        if: steps.check-package.outputs.package-exists == 'true'
+        uses: actions/delete-package-versions@v4
+        continue-on-error: true
+        with:
+          package-name: ${{ env.IMAGE_NAME }}
+          package-type: 'container'
+          min-versions-to-keep: 10
+          delete-only-untagged-versions: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip cleanup notification
+        if: steps.check-package.outputs.package-exists == 'false'
+        run: |
+          echo "⏭️ Skipping container cleanup - no packages published yet"
+          echo "This is normal for new repositories that haven't published Docker images"
+
+  cleanup-artifacts:
+    name: Cleanup Old Artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Delete old artifacts
+        uses: c-hive/gha-remove-artifacts@v1
+        continue-on-error: true
+        with:
+          age: '30 days'
+          skip-tags: true
+          skip-recent: 5
+
+  cleanup-caches:
+    name: Cleanup Old Caches
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Cleanup old caches
+        continue-on-error: true
+        run: |
+          echo "Checking for old caches..."
+          
+          # Check if we can access the caches API
+          if ! gh api repos/${{ github.repository }}/actions/caches --paginate >/dev/null 2>&1; then
+            echo "ℹ️ Cannot access caches API or no caches exist"
+            exit 0
+          fi
+          
+          # Get list of caches older than 7 days
+          gh api repos/${{ github.repository }}/actions/caches --paginate | \
+            jq -r '.actions_caches[]? | select(.created_at < (now - 86400 * 7 | strftime("%Y-%m-%dT%H:%M:%SZ"))) | .id' > old_cache_ids.txt 2>/dev/null || true
+          
+          # Delete old caches
+          if [ -s old_cache_ids.txt ]; then
+            echo "Found old caches to delete..."
+            while read cache_id; do
+              if [ "${{ inputs.dry_run }}" != "true" ]; then
+                if gh api --method DELETE repos/${{ github.repository }}/actions/caches/$cache_id 2>/dev/null; then
+                  echo "✅ Deleted cache ID: $cache_id"
+                else
+                  echo "⚠️ Failed to delete cache ID: $cache_id"
+                fi
+              else
+                echo "🔍 Would delete cache ID: $cache_id (dry run)"
+              fi
+            done < old_cache_ids.txt
+          else
+            echo "ℹ️ No old caches to delete"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  cleanup-summary:
+    name: Cleanup Summary
+    runs-on: ubuntu-latest
+    needs: [cleanup-packages, cleanup-artifacts, cleanup-caches]
+    if: always()
+    
+    steps:
+      - name: Cleanup Summary
+        run: |
+          echo "🧹 Cleanup Workflow Summary"
+          echo "=========================="
+          echo "Packages cleanup: ${{ needs.cleanup-packages.result }}"
+          echo "Artifacts cleanup: ${{ needs.cleanup-artifacts.result }}"
+          echo "Caches cleanup: ${{ needs.cleanup-caches.result }}"
+          echo ""
+          
+          if [ "${{ needs.cleanup-packages.result }}" = "failure" ]; then
+            echo "ℹ️ Package cleanup failed - this is normal for new repositories"
+          fi
+          
+          echo "✅ Cleanup workflow completed"
